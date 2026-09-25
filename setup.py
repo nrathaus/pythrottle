@@ -7,7 +7,7 @@ print(setuptools.find_packages(exclude=("pythrottle.tests",)))
 
 setuptools.setup(
     name="pythrottle",
-    version="0.1.1",
+    version="6.9.25",
     author="Flus Flas",
     author_email="aflusflas@gmail.com",
     description="Set of tools for throttling and controlling the execution "
