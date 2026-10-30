@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from bisect import bisect_left
 
 import pytest
 
@@ -125,13 +126,79 @@ def test_rate_at_single_sample():
 
 def test_rate_at_last_sample_matches_rate():
     """
-    Measured as of the most recent sample, `rate_at()` spans exactly the same
-    window as `rate()` and must agree with it.
+    While nothing has been pruned, every sample lies inside the window, so
+    both methods start at `_times[0]`. Measured as of the most recent
+    sample they then span the same window and must agree.
+
+    This holds only for an unpruned meter.
+    `test_rate_at_differs_from_rate_once_pruning_runs` covers the other case.
     """
     meter = synthetic_meter()
     last = (SAMPLES - 1) * SPACING
     assert meter.rate() == 64.0
     assert meter.rate_at(last) == meter.rate()
+
+
+def test_rate_at_differs_from_rate_once_pruning_runs():
+    """
+    `_remove_past_items()` deliberately retains one sample older than
+    `last - interval`, to keep the retained span at or above `interval`.
+    `rate_at()` excludes that sample, so the two methods measure from
+    different window starts and disagree at the same instant.
+
+    The divergence is intended behaviour, documented on `rate_at()`. This
+    pins it so that nobody later aligns the two windows by accident, which
+    would change `rate()` and break callers relying on 0.1.1 semantics.
+    """
+    meter = RateMeter(interval=RATE_AT_INTERVAL)
+    for stamp in (0.0, 0.5, 1.4):
+        meter._times.append(stamp)
+        meter._iters.append(len(meter._iters))
+    meter._remove_past_items()
+    last = meter._times[-1]
+
+    # The sample at 0.0 sits below the boundary and is retained anyway.
+    boundary = bisect_left(meter._times, last - RATE_AT_INTERVAL)
+    assert meter._times[0] < last - RATE_AT_INTERVAL
+    assert boundary == 1
+
+    assert meter.rate() == pytest.approx(2 / 1.4)
+    assert meter.rate_at(last) == pytest.approx(1 / 0.9)
+    assert meter.rate() != meter.rate_at(last)
+
+
+def test_rate_at_behind_the_last_sample_is_not_inflated():
+    """
+    The numerator stops at `now`, so samples recorded after it are not
+    counted. Without that bound a 10/s stream reads 200/s when measured a
+    twentieth of the way in, because a full burst is divided by a sliver of
+    time.
+    """
+    meter = RateMeter(interval=RATE_AT_INTERVAL)
+    for i in range(11):
+        meter._times.append(i * 0.1)
+        meter._iters.append(i)
+    last = meter._times[-1]
+
+    for back in (0.0, 0.25, 0.5, 0.9, 0.95):
+        measured = meter.rate_at(last - back)
+        assert measured <= 10.0 + 1e-9, f"{back}s back read {measured}"
+
+    # Far enough back that fewer than two samples remain in the window.
+    assert meter.rate_at(last - 0.95) == 0
+
+
+def test_rate_at_forward_is_unaffected_by_the_bound():
+    """
+    Bounding the numerator must not move the forward case, which is the one
+    every pacing caller uses.
+    """
+    meter = synthetic_meter()
+    last = (SAMPLES - 1) * SPACING
+
+    assert meter.rate_at(last) == 64.0
+    assert meter.rate_at(1.0) == 31.0
+    assert meter.rate_at(1.25) == 15.0
 
 
 def test_rate_at_decays_without_update():

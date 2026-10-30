@@ -1,4 +1,4 @@
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import deque
 from threading import Lock
 from time import perf_counter
@@ -45,8 +45,10 @@ class RateMeter:
         first_time_index = bisect_left(self._times, first_time_value)
 
         # Time difference between last and first items must remain
-        # equal or greater than 'interval'
-        if self._times.count(first_time_value) == 0:
+        # equal or greater than 'interval'. `bisect_left` cannot return
+        # `len` here, because `first_time_value` is at most `_times[-1]`,
+        # so the index read is safe.
+        if self._times[first_time_index] != first_time_value:
             first_time_index -= 1
 
         for _ in range(first_time_index):
@@ -91,12 +93,20 @@ class RateMeter:
         """
         Rate over the last `interval` seconds, measured as of `now`.
 
-        Unlike :meth:`rate`, whose window ends at the most recent sample, this
-        one ends at `now`. The value therefore decays as time passes with no
-        new samples, and reaches 0 once the last sample has left the window.
+        Unlike :meth:`rate`, which measures between the first and last
+        *retained* samples, this one measures over exactly
+        `[now - interval, now]`. Pruning deliberately keeps one sample older
+        than `last - interval`, so that the retained span stays at or above
+        `interval`; *both* ends of the window therefore differ, and the two
+        methods disagree even when `now` is the most recent sample.
+
+        The value decays as time passes with no new samples, and reaches 0
+        once the last sample has left the window.
 
         Like :meth:`rate`, this counts the intervals *between* samples, so a
-        window holding a single sample reports 0.
+        window holding a single sample reports 0. Samples recorded after
+        `now` are never counted, so a `now` in the past reports the rate as
+        it stood then rather than an inflated one.
 
         This method never mutates the stored samples, so asking for the rate
         does not prune the window that the next answer depends on.
@@ -113,10 +123,11 @@ class RateMeter:
                 return 0
 
             first = bisect_left(self._times, at - self.interval)
-            if first >= len(self._times):
+            upper = bisect_right(self._times, at)
+            if upper - first < 2:
                 return 0
 
-            value_diff = self._iters[-1] - self._iters[first]
+            value_diff = self._iters[upper - 1] - self._iters[first]
             time_diff = at - self._times[first]
 
             return 0 if time_diff <= 0 else value_diff / time_diff
